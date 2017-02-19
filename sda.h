@@ -36,11 +36,13 @@
 #include <sys/types.h>
 #include <stdint.h>
 
-// the declaration
-// FIXME
-#define SDA(type, variable) do ( \
-    ) while(0)
-
+//Types designed for type-checking arguments to functions that may use sda arrays
+typedef int *sdaint;
+typedef double *sdadouble;
+typedef float *sdafloat;
+//You can also use this generic type:
+typedef void *sda;
+//But then you need to use the sdaat function to access elements
 
 struct __attribute__ ((__packed__)) sdahdr8 {
     uint8_t len; /* used */
@@ -71,63 +73,86 @@ struct __attribute__ ((__packed__)) sdahdr64 {
     char buf[];
 };
 
-#define SDA_TYPE_8  1
-#define SDA_TYPE_16 2
-#define SDA_TYPE_32 3
-#define SDA_TYPE_64 4
-#define SDA_TYPE_MASK 7
-#define SDA_TYPE_BITS 3
+//sdahdr* type
+#define SDA_HTYPE_8  1
+#define SDA_HTYPE_16 2
+#define SDA_HTYPE_32 3
+#define SDA_HTYPE_64 4
+#define SDA_HTYPE_BITS 3
+#define SDA_HTYPE_MASK 7
+
+#if 0
+//element type for run-time type-checking
+#define SDA_ETYPE_CHAR  0
+#define SDA_ETYPE_INT32 1
+#define SDA_ETYPE_INT64 2
+#define SDA_ETYPE_BITS  3
+#define SDA_ETYPE_OFF   (SDA_HTYPE_BITS+1)
+#define SDA_ETYPE_MASK  7<<(SDA_ETYPE_OFF)
+//element sign
+#define SDA_ESGN_SGN  0
+#define SDA_ESGN_USGN 1
+#define SDA_ESGN_BITS 1
+#define SDA_ESGN_OFF  (SDA_ETYPE_OFF+1)
+#define SDA_ESGN_MASK  1<<(SDA_ESGN_OFF)
+#endif
+
 #define SDA_HDR_TYPE(T)  struct sdahdr##T
 #define SDA_HDR_VAR(T,s) struct sdahdr##T *sh = (void*)((s)-(sizeof(struct sdahdr##T)))
 #define SDA_HDR(T,s) ((struct sdahdr##T *)((s)-(sizeof(struct sdahdr##T))))
 
 /******* Methods for accessing each member *******/
 
+/** Returns flags */
+static inline unsigned char sdaflags(const sda s) {
+    return ((const unsigned char *)s)[-1];
+}
+
 /** Returns len */
-static inline size_t sdalen(const void *s) {
-    unsigned char flags = s[-1];
-    switch(flags&SDS_TYPE_MASK) {
-        case SDS_TYPE_8:
-            return SDS_HDR(8,s)->len;
-        case SDS_TYPE_16:
-            return SDS_HDR(16,s)->len;
-        case SDS_TYPE_32:
-            return SDS_HDR(32,s)->len;
-        case SDS_TYPE_64:
-            return SDS_HDR(64,s)->len;
+static inline size_t sdalen(const sda s) {
+    unsigned char flags = sdaflags(s);
+    switch(flags&SDA_HTYPE_MASK) {
+        case SDA_HTYPE_8:
+            return SDA_HDR(8,s)->len;
+        case SDA_HTYPE_16:
+            return SDA_HDR(16,s)->len;
+        case SDA_HTYPE_32:
+            return SDA_HDR(32,s)->len;
+        case SDA_HTYPE_64:
+            return SDA_HDR(64,s)->len;
     }
     return 0;
 }
 
 /* sdaalloc() = sdaavail() + sdalen() */
 /** Returns alloc */
-static inline size_t sdaalloc(const void *s) {
-    unsigned char flags = s[-1];
-    switch(flags&SDS_TYPE_MASK) {
-        case SDS_TYPE_8:
-            return SDS_HDR(8,s)->alloc;
-        case SDS_TYPE_16:
-            return SDS_HDR(16,s)->alloc;
-        case SDS_TYPE_32:
-            return SDS_HDR(32,s)->alloc;
-        case SDS_TYPE_64:
-            return SDS_HDR(64,s)->alloc;
+static inline size_t sdaalloc(const sda s) {
+    unsigned char flags = sdaflags(s);
+    switch(flags&SDA_HTYPE_MASK) {
+        case SDA_HTYPE_8:
+            return SDA_HDR(8,s)->alloc;
+        case SDA_HTYPE_16:
+            return SDA_HDR(16,s)->alloc;
+        case SDA_HTYPE_32:
+            return SDA_HDR(32,s)->alloc;
+        case SDA_HTYPE_64:
+            return SDA_HDR(64,s)->alloc;
     }
     return 0;
 }
 
 /** Returns sz */
-static inline size_t sdasz(const void *s) {
-    unsigned char flags = s[-1];
-    switch(flags&SDS_TYPE_MASK) {
-        case SDS_TYPE_8:
-            return SDS_HDR(8,s)->sz;
-        case SDS_TYPE_16:
-            return SDS_HDR(16,s)->sz;
-        case SDS_TYPE_32:
-            return SDS_HDR(32,s)->sz;
-        case SDS_TYPE_64:
-            return SDS_HDR(64,s)->sz;
+static inline size_t sdasz(const sda s) {
+    unsigned char flags = sdaflags(s);
+    switch(flags&SDA_HTYPE_MASK) {
+        case SDA_HTYPE_8:
+            return SDA_HDR(8,s)->sz;
+        case SDA_HTYPE_16:
+            return SDA_HDR(16,s)->sz;
+        case SDA_HTYPE_32:
+            return SDA_HDR(32,s)->sz;
+        case SDA_HTYPE_64:
+            return SDA_HDR(64,s)->sz;
     }
     return 0;
 }
@@ -137,21 +162,25 @@ static inline size_t sdasz(const void *s) {
 /**
  * Returns the buffer size in bytes.
  */
-static inline size_t sdasizeof(const void *s) {
-    unsigned char flags = s[-1];
-    switch(flags&SDS_TYPE_MASK) {
-        case SDS_TYPE_8:
+static inline size_t sdasizeof(const sda s) {
+    unsigned char flags = sdaflags(s);
+    switch(flags&SDA_HTYPE_MASK) {
+        case SDA_HTYPE_8: {
             SDA_HDR_VAR(8,s);
             return sh->sz * sh->len;
-        case SDS_TYPE_16:
+        }
+        case SDA_HTYPE_16: {
             SDA_HDR_VAR(16,s);
             return sh->sz * sh->len;
-        case SDS_TYPE_32:
+        }
+        case SDA_HTYPE_32: {
             SDA_HDR_VAR(32,s);
             return sh->sz * sh->len;
-        case SDS_TYPE_64:
+        }
+        case SDA_HTYPE_64: {
             SDA_HDR_VAR(64,s);
             return sh->sz * sh->len;
+        }
     }
     return 0;
 }
@@ -159,21 +188,25 @@ static inline size_t sdasizeof(const void *s) {
 /**
  * Returns the number of free elements that have been pre-allocated.
  */
-static inline size_t sdaavail(const void *s) {
-    unsigned char flags = s[-1];
-    switch(flags&SDS_TYPE_MASK) {
-        case SDS_TYPE_8:
+static inline size_t sdaavail(const sda s) {
+    unsigned char flags = sdaflags(s);
+    switch(flags&SDA_HTYPE_MASK) {
+        case SDA_HTYPE_8: {
             SDA_HDR_VAR(8,s);
             return sh->alloc - sh->len;
-        case SDS_TYPE_16:
+        }
+        case SDA_HTYPE_16: {
             SDA_HDR_VAR(16,s);
             return sh->alloc - sh->len;
-        case SDS_TYPE_32:
+        }
+        case SDA_HTYPE_32: {
             SDA_HDR_VAR(32,s);
             return sh->alloc - sh->len;
-        case SDS_TYPE_64:
+        }
+        case SDA_HTYPE_64: {
             SDA_HDR_VAR(64,s);
             return sh->alloc - sh->len;
+        }
     }
     return 0;
 }
@@ -181,19 +214,19 @@ static inline size_t sdaavail(const void *s) {
 /**
  * Sets len directly (no re-allocation!)
  */
-static inline void sdasetlen(void *s, size_t newlen) {
-    unsigned char flags = s[-1];
-    switch(flags&SDA_TYPE_MASK) {
-        case SDA_TYPE_8:
+static inline void sdasetlen(sda s, size_t newlen) {
+    unsigned char flags = sdaflags(s);
+    switch(flags&SDA_HTYPE_MASK) {
+        case SDA_HTYPE_8:
             SDA_HDR(8,s)->len = newlen;
             break;
-        case SDA_TYPE_16:
+        case SDA_HTYPE_16:
             SDA_HDR(16,s)->len = newlen;
             break;
-        case SDA_TYPE_32:
+        case SDA_HTYPE_32:
             SDA_HDR(32,s)->len = newlen;
             break;
-        case SDA_TYPE_64:
+        case SDA_HTYPE_64:
             SDA_HDR(64,s)->len = newlen;
             break;
     }
@@ -202,19 +235,19 @@ static inline void sdasetlen(void *s, size_t newlen) {
 /**
  * Increments len directly (no re-allocation!)
  */
-static inline void sdainclen(void *s, size_t inc) {
-    unsigned char flags = s[-1];
-    switch(flags&SDA_TYPE_MASK) {
-        case SDA_TYPE_8:
+static inline void sdainclen(sda s, size_t inc) {
+    unsigned char flags = sdaflags(s);
+    switch(flags&SDA_HTYPE_MASK) {
+        case SDA_HTYPE_8:
             SDA_HDR(8,s)->len += inc;
             break;
-        case SDA_TYPE_16:
+        case SDA_HTYPE_16:
             SDA_HDR(16,s)->len += inc;
             break;
-        case SDA_TYPE_32:
+        case SDA_HTYPE_32:
             SDA_HDR(32,s)->len += inc;
             break;
-        case SDA_TYPE_64:
+        case SDA_HTYPE_64:
             SDA_HDR(64,s)->len += inc;
             break;
     }
@@ -223,24 +256,30 @@ static inline void sdainclen(void *s, size_t inc) {
 /**
  * Sets alloc directly (no re-allocation!)
  */
-static inline void sdasetalloc(void *s, size_t newlen) {
-    unsigned char flags = s[-1];
-    switch(flags&SDA_TYPE_MASK) {
-        case SDA_TYPE_8:
+static inline void sdasetalloc(sda s, size_t newlen) {
+    unsigned char flags = sdaflags(s);
+    switch(flags&SDA_HTYPE_MASK) {
+        case SDA_HTYPE_8:
             SDA_HDR(8,s)->alloc = newlen;
             break;
-        case SDA_TYPE_16:
+        case SDA_HTYPE_16:
             SDA_HDR(16,s)->alloc = newlen;
             break;
-        case SDA_TYPE_32:
+        case SDA_HTYPE_32:
             SDA_HDR(32,s)->alloc = newlen;
             break;
-        case SDA_TYPE_64:
+        case SDA_HTYPE_64:
             SDA_HDR(64,s)->alloc = newlen;
             break;
     }
 }
 
+/** Sets flags */
+static inline void sdasetflags(sda s, unsigned char flags) {
+    ((unsigned char*)s)[-1] = flags;
+}
+
+#if 0
 /******* Higher level methods for operating on sda's *******/
 
 sda sdanew(const void *init, size_t initlen);
@@ -274,6 +313,7 @@ void *sdaAllocPtr(sda s);
 void *sda_malloc(size_t size);
 void *sda_realloc(void *ptr, size_t size);
 void sda_free(void *ptr);
+#endif //0
 
-#endif
+#endif //__SDA_H
 

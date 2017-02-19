@@ -32,18 +32,19 @@
 //#include <ctype.h>
 #include <assert.h>
 //#include <limits.h>
+#include <string.h>
 #include "sda.h"
-#include "sdaalloc.h"
+#include "sdsalloc.h"
 
 static inline size_t sdaHdrSize(char type) {
-    switch(type&SDA_TYPE_MASK) {
-        case SDA_TYPE_8:
+    switch(type&SDA_HTYPE_MASK) {
+        case SDA_HTYPE_8:
             return sizeof(SDA_HDR_TYPE(8));
-        case SDA_TYPE_16:
+        case SDA_HTYPE_16:
             return sizeof(SDA_HDR_TYPE(16));
-        case SDA_TYPE_32:
+        case SDA_HTYPE_32:
             return sizeof(SDA_HDR_TYPE(32));
-        case SDA_TYPE_64:
+        case SDA_HTYPE_64:
             return sizeof(SDA_HDR_TYPE(64));
     }
     return 0;
@@ -51,14 +52,14 @@ static inline size_t sdaHdrSize(char type) {
 
 static inline char sdaReqType(size_t req_size) {
     if (req_size < 1<<8)
-        return SDA_TYPE_8;
+        return SDA_HTYPE_8;
     if (req_size < 1<<16)
-        return SDA_TYPE_16;
+        return SDA_HTYPE_16;
 #if (LONG_MAX == LLONG_MAX)
     if (req_size < 1ll<<32)
-        return SDA_TYPE_32;
+        return SDA_HTYPE_32;
 #endif
-    return SDA_TYPE_64;
+    return SDA_HTYPE_64;
 }
 
 
@@ -85,7 +86,7 @@ static inline char sdaReqType(size_t req_size) {
  */
 #define sdanew(s, init) (typeof(s))_sdanewsz((init), sizeof(init), sizeof(*(s)))
 
-void* _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
+sda _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
     assert(type_sz <= UINT8_MAX);
     
     //ptr to sda header
@@ -108,7 +109,7 @@ void* _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
     fp = ((unsigned char*)s)-1;
     *fp = sda_type;
     switch(sda_type) {
-        case SDA_TYPE_8: {
+        case SDA_HTYPE_8: {
             SDA_HDR_VAR(8,s);
             uint8_t len = (uint8_t)(init_sz/type_sz);
             sh->len = len;
@@ -116,7 +117,7 @@ void* _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
             sh->sz = sz;
             break;
         }
-        case SDA_TYPE_16: {
+        case SDA_HTYPE_16: {
             SDA_HDR_VAR(16,s);
             uint16_t len = (uint16_t)(init_sz/type_sz);
             sh->len = len;
@@ -124,7 +125,7 @@ void* _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
             sh->sz = sz;
             break;
         }
-        case SDA_TYPE_32: {
+        case SDA_HTYPE_32: {
             SDA_HDR_VAR(32,s);
             uint32_t len = (uint32_t)(init_sz/type_sz);
             sh->len = len;
@@ -132,7 +133,7 @@ void* _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
             sh->sz = sz;
             break;
         }
-        case SDA_TYPE_64: {
+        case SDA_HTYPE_64: {
             SDA_HDR_VAR(64,s);
             uint64_t len = (uint64_t)(init_sz/type_sz);
             sh->len = len;
@@ -154,7 +155,7 @@ void* _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
 //FIXME: Check whether sdasz(src) == sizeof(s)
 
 /* Free an sda array. No operation is performed if 's' is NULL. */
-void sdafree(void *s) {
+void sdafree(sda s) {
     if (s == NULL) return;
     char *tmp = (char *)s;
     s_free(tmp-sdaHdrSize(tmp[-1]));
@@ -180,7 +181,7 @@ sda sdaMakeRoomFor(sda s, size_t add_sz) {
     size_t avail = sdaavail(s);
     size_t len, newlen;
     char type;
-    char oldtype = s[-1] & SDA_TYPE_MASK;
+    unsigned char oldtype = sdaflags(s) & SDA_HTYPE_MASK;
     size_t hdrlen;
 
     /* Return ASAP if there is enough space left. */
@@ -209,7 +210,7 @@ sda sdaMakeRoomFor(sda s, size_t add_sz) {
         memcpy((char*)newsh+hdrlen, s, len);
         s_free(sh);
         s = (char*)newsh+hdrlen;
-        s[-1] = type;
+        SDA_FLAGS(s) = type;
         sdasetlen(s, len);
     }
     sdasetalloc(s, newlen);
@@ -224,7 +225,7 @@ sda sdaMakeRoomFor(sda s, size_t add_sz) {
  * references must be substituted with the new pointer returned by the call. */
 sda sdaRemoveFreeSpace(sda s) {
     void *sh, *newsh;
-    char type, oldtype = s[-1] & SDA_TYPE_MASK;
+    char type, oldtype = sdaflags(s) & SDA_HTYPE_MASK;
     size_t hdrlen;
     size_t len = sdalen(s);
     sh = (char*)s-sdaHdrSize(oldtype);
@@ -241,7 +242,7 @@ sda sdaRemoveFreeSpace(sda s) {
         memcpy((char*)newsh+hdrlen, s, len);
         s_free(sh);
         s = (char*)newsh+hdrlen;
-        s[-1] = type;
+        SDA_FLAGS(s) = type;
         sdasetlen(s, len);
     }
     sdasetalloc(s, len);
@@ -257,13 +258,13 @@ sda sdaRemoveFreeSpace(sda s) {
  */
 size_t sdaAllocSize(sda s) {
     size_t alloc = sdaalloc(s);
-    return sdaHdrSize(s[-1])+alloc+1;
+    return sdaHdrSize(sdaflags(s))+alloc+1;
 }
 
 /* Return the pointer of the actual SDA allocation (normally SDA strings
  * are referenced by the start of the array buffer). */
 void *sdaAllocPtr(sda s) {
-    return (void*) (s-sdaHdrSize(s[-1]));
+    return (void*) (s-sdaHdrSize(sdaflags(s)));
 }
 
 /* Increment the sda length and decrements the left free space at the
@@ -290,36 +291,36 @@ void *sdaAllocPtr(sda s) {
  * sdaIncrLen(s, nread);
  */
 void sdaIncrLen(sda s, int incr) {
-    unsigned char flags = s[-1];
+    unsigned char flags = sdaflags(s);
     size_t len;
-    switch(flags&SDA_TYPE_MASK) {
-        case SDA_TYPE_5: {
+    switch(flags&SDA_HTYPE_MASK) {
+        case SDA_HTYPE_5: {
             unsigned char *fp = ((unsigned char*)s)-1;
-            unsigned char oldlen = SDA_TYPE_5_LEN(flags);
+            unsigned char oldlen = SDA_HTYPE_5_LEN(flags);
             assert((incr > 0 && oldlen+incr < 32) || (incr < 0 && oldlen >= (unsigned int)(-incr)));
-            *fp = SDA_TYPE_5 | ((oldlen+incr) << SDA_TYPE_BITS);
+            *fp = SDA_HTYPE_5 | ((oldlen+incr) << SDA_HTYPE_BITS);
             len = oldlen+incr;
             break;
         }
-        case SDA_TYPE_8: {
+        case SDA_HTYPE_8: {
             SDA_HDR_VAR(8,s);
             assert((incr >= 0 && sh->alloc-sh->len >= incr) || (incr < 0 && sh->len >= (unsigned int)(-incr)));
             len = (sh->len += incr);
             break;
         }
-        case SDA_TYPE_16: {
+        case SDA_HTYPE_16: {
             SDA_HDR_VAR(16,s);
             assert((incr >= 0 && sh->alloc-sh->len >= incr) || (incr < 0 && sh->len >= (unsigned int)(-incr)));
             len = (sh->len += incr);
             break;
         }
-        case SDA_TYPE_32: {
+        case SDA_HTYPE_32: {
             SDA_HDR_VAR(32,s);
             assert((incr >= 0 && sh->alloc-sh->len >= (unsigned int)incr) || (incr < 0 && sh->len >= (unsigned int)(-incr)));
             len = (sh->len += incr);
             break;
         }
-        case SDA_TYPE_64: {
+        case SDA_HTYPE_64: {
             SDA_HDR_VAR(64,s);
             assert((incr >= 0 && sh->alloc-sh->len >= (uint64_t)incr) || (incr < 0 && sh->len >= (uint64_t)(-incr)));
             len = (sh->len += incr);
@@ -1072,14 +1073,56 @@ void *sda_malloc(size_t size) { return s_malloc(size); }
 void *sda_realloc(void *ptr, size_t size) { return s_realloc(ptr,size); }
 void sda_free(void *ptr) { s_free(ptr); }
 
+#endif //0
+
+
 #if defined(SDA_TEST_MAIN)
 #include <stdio.h>
 
-#endif
-
-#ifdef SDA_TEST_MAIN
 int main(void) {
+    int32_t tmp[] = {0, 1, 2, 3, 4, 5};
+    sdaint s = (sdaint)_sdanewsz(tmp, sizeof(tmp), sizeof(*s));
+    puts("sdaint s w/ _sdanewsz:");
+    printf("  s.len: %d\n", sdalen(s));
+    printf("  s.alloc: %d\n", sdaalloc(s));
+    printf("  s.sz: %d\n", sdasz(s));
+    printf("  sdasizeof(s): %d\n", sdasizeof(s));
+    printf("  sdaavail(s) : %d\n", sdaavail(s));
+    puts("");
+    
+    for(int i=0; i<sdalen(s); i++) {
+        printf("  s[%d] %d\n", i, s[i]);
+    }
+    puts("");
+    
+    sdafree(s);
+    s = NULL;
+    
+    s = sdanew(s, ((uint32_t[]){1, 2, 3, UINT32_MAX}));
+    puts("sdaint s w/ sdanew:");
+    printf("  s.len: %d\n", sdalen(s));
+    printf("  s.alloc: %d\n", sdaalloc(s));
+    printf("  s.sz: %d\n", sdasz(s));
+    printf("  sdasizeof(s): %d\n", sdasizeof(s));
+    printf("  sdaavail(s) : %d\n", sdaavail(s));
+    puts("");
+    
+    for(int i=0; i<sdalen(s); i++) {
+        printf("  s[%d] %d\n", i, s[i]);
+    }
+    puts("");
+    
+    puts("sdaclear");
+    sdaclear(s);
+    for(int i=0; i<sdalen(s); i++) {
+        printf("  s[%d] %d\n", i, s[i]);
+    }
+    puts("done");
+    
+    sdafree(s);
+    s = NULL;
+    
+    return 0;
 }
 #endif
 
-#endif //0
