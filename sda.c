@@ -120,40 +120,39 @@ sda sdaresize(sda s, size_t len) {
 }
 
 
-#if 0
 /* Append the specified array pointed by 't' of 'size' bytes to the
- * end of the specified sda array 's'.
+ * end of the specified sda array 's', extending s if needed.
  *
  * After the call, the passed sda array is no longer valid and all the
  * references must be substituted with the new pointer returned by the call.
  */
 sda sdacat(sda s, const void *t, size_t size) {
-    size_t curlen = sdalen(s);
-    uint8_t sz = sdasz(s);
-
+    size_t sz;
     s = sdaMakeRoomFor(s, size);
     if (s == NULL) return NULL;
-    memcpy(s+(curlen*sz), t, size);
+    
+    sz = sdasz(s);
+    memcpy(((char*)s)+sdalen(s)*sz, t, size);
     sdainclen(s, size/sz);
     return s;
 }
 
-/* Append the specified sda 't' to the existing sda 's'.
+/* Append the specified sda array 't' to the existing sda array 's'.
  *
  * After the call, the modified sda array is no longer valid and all the
  * references must be substituted with the new pointer returned by the call.
  */
-sda sdacatsda(sda s, const sda t) {
-    return sdacat(s, t, sdalen(t));
+sda sda_extend(sda s, const sda t) {
+    return sdacat(s, t, sdasize(t));
 }
 
 /* Destructively modify the sda array 's' to hold the specified array pointed by 't' of 'size' bytes.
  */
 sda sdacpy(sda s, const void *t, size_t size) {
-    size_t buf_sz = sdasizeofbuf(s);
+    size_t buf_sz = sdasize(s);
     //make room for the add_sz if needed
-    if(size > buff_sz) {
-        s = sdaMakeRoomFor(s, size-buff_sz);
+    if(size > buf_sz) {
+        s = sdaMakeRoomFor(s, size-buf_sz);
         if (s == NULL) return NULL;
     }
     
@@ -162,8 +161,15 @@ sda sdacpy(sda s, const void *t, size_t size) {
     return s;
 }
 
+/* Destructively modify sda array 's' to hold the sds array 't', expanding s if needed.
+ */
+sda sda_replace(sda s, const sda t) {
+    return sdacpy(s, t, sdasize(t));
+}
 
 
+
+#if 0 //FIXME: Implement?
 /* Turn the array into a smaller (or equal) array containing only the
  * subarray specified by the 'start' and 'end' indexes.
  *
@@ -232,9 +238,7 @@ int sdacmp(const sda s1, const sda s2) {
     return cmp;
 }
 
-#endif //0 not implemented
 
-#if 0 //FIXME: Implement?
 /* Join an array of C strings using the specified separator (also a C array).
  * Returns the result as an sda array. */
 sda sdajoin(char **argv, int argc, char *sep) {
@@ -341,7 +345,7 @@ sda sdaRemoveFreeSpace(sda s) {
     //len we want to resize to
     size_t len = sdalen(s);
     //size of the actual buffer
-    size_t bsz = sdasizeofbuf(s);
+    size_t bsz = sdasize(s);
     sh = (char*)s-sdaHdrSize(oldtype);
 
     type = sdaReqType(len);
@@ -376,7 +380,7 @@ sda sdaRemoveFreeSpace(sda s) {
  * 3) The free buffer at the end if any.
  */
 size_t sdaAllocSize(sda s) {
-    size_t alloc_sz = sdasizeofalloc(s);
+    size_t alloc_sz = sdasz(s)*sdaalloc(s);
     return sdaHdrSize(sdaflags(s))+alloc_sz;
 }
 
@@ -447,6 +451,16 @@ sda _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
     return s;
 }
 
+void *_sda_pop(sda s) {
+    size_t len = sdalen(s);
+    void *ret;
+    if(len < 1) return NULL;
+    //guaranteed, so use faster unsafe ver
+    ret = _sda_ptr_at(s, len-1);
+    sdasetlen(s, len-1);
+    return ret;
+}
+
 /******* Test stuff *******/
 
 #if defined(SDA_TEST_MAIN)
@@ -470,7 +484,7 @@ int main(void) {
     }
     puts("");
     
-    sda_raii unsigned int *t = sdadup(t, s);
+    sda_raii unsigned int *t = (unsigned int *)sdadup(s);
     assert((void*)t != (void*)s);
     assert(sdalen(t) == sdalen(s));
     for(int i=0; i<sdalen(t) && i<sdalen(s); i++) {
@@ -526,9 +540,9 @@ int main(void) {
     printf("illegal: t[%zu] = %u\n", sdalen(t)+1, sda_get(t, sdalen(t)+1));
     
     for(int i=0; i<sdalen(t); i++) {
-        int tmp = sdalen(t)-i;
-        printf("set t[%d] = %u\n", i, tmp);
-        sda_set(t, i, tmp);
+        int j = sdalen(t)-i;
+        printf("set t[%d] = %u\n", i, j);
+        sda_set(t, i, j);
     }
     for(int i=0; i<sdalen(t); i++) {
         printf("  t[%d] %u\n", i, t[i]);

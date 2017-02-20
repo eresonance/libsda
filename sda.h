@@ -204,7 +204,7 @@ static inline void sdahdr(const sda s, struct sdahdr_uni *ret) {
 /**
  * Returns the in-use buffer size in bytes (len*sz).
  */
-static inline size_t sdasizeofbuf(const sda s) {
+static inline size_t sdasize(const sda s) {
     unsigned char flags = sdaflags(s);
     switch(flags&SDA_HTYPE_MASK) {
         case SDA_HTYPE_8: {
@@ -222,31 +222,6 @@ static inline size_t sdasizeofbuf(const sda s) {
         case SDA_HTYPE_64: {
             SDA_HDR_VAR(64,s);
             return sh->sz * sh->len;
-        }
-    }
-    return 0;
-}
-/**
- * Returns the total allocated buffer size in bytes (alloc*sz).
- */
-static inline size_t sdasizeofalloc(const sda s) {
-    unsigned char flags = sdaflags(s);
-    switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8: {
-            SDA_HDR_VAR(8,s);
-            return sh->sz * sh->alloc;
-        }
-        case SDA_HTYPE_16: {
-            SDA_HDR_VAR(16,s);
-            return sh->sz * sh->alloc;
-        }
-        case SDA_HTYPE_32: {
-            SDA_HDR_VAR(32,s);
-            return sh->sz * sh->alloc;
-        }
-        case SDA_HTYPE_64: {
-            SDA_HDR_VAR(64,s);
-            return sh->sz * sh->alloc;
         }
     }
     return 0;
@@ -359,7 +334,7 @@ static inline void sdasetflags(sda s, unsigned char flags) {
  * @param init: Pointer to array to initialize the sda buffer to, can be NULL.
  * @param init_sz: is sizeof(init) in bytes.
  */
-#define sdanewsz(s, init, init_sz) (typeof(s))_sdanewsz((init), (init_sz), sizeof(*(s)))
+#define sdanewsz(s, init, init_sz) (__typeof__(s))_sdanewsz((init), (init_sz), sizeof(*(s)))
 
 /**
  * Create a new sda with the content specified by the 'init' *array* (NOT pointer).
@@ -369,14 +344,18 @@ static inline void sdasetflags(sda s, unsigned char flags) {
  * @param s: Pointer to sda array you want to init.
  * @param init: Array to initialize the sda buffer to, can be NULL. Not a pointer!
  */
-#define sdanew(s, init) (typeof(s))_sdanewsz((init), sizeof(init), sizeof(*(s)))
+#define sdanew(s, init) (__typeof__(s))_sdanewsz((init), sizeof(init), sizeof(*(s)))
 
 /** Create an empty (zero length) sda array */
 #define sdaempty(s) sdanewsz((s), NULL, 0)
 
-/** Duplicate an sda array. */
-#define sdadup(s, src) sdanewsz((s), (src), sdasizeofbuf(src))
-//FIXME: Check whether sdasz(src) == sizeof(s)
+/** Duplicate an sda array, returning a pointer to the new sda array.
+ * The sizeof(*t) must be the same as whatever you're assigning this to.
+ */
+#define sdadup(t) ({ \
+    __typeof__(t) tmp = (t); \
+    sdanewsz(tmp, tmp, sdasize(tmp)); \
+    })
 
 /** Free an sda array
  * @param s: Can be NULL
@@ -387,12 +366,27 @@ sda sdafree(sda s);
 /** Make an sda array zero length, setting buffer as free space to be used later */
 sda sdaclear(sda s);
 /** Set the length of an sds array, reallocating as neccesary */
-sda sdaresize(sda s, size_t len);
-
-sda sda_append(sda s, const void *t, size_t size);
+sda sdaresize(sda s, size_t size);
+/** Add t of size bytes to the end of s */
+sda sdacat(sda s, const void *t, size_t size);
+/** Add t to the end of s, growing if needed */
 sda sda_extend(sda s, const sda t);
-size_t sda_index(sda s, const void *x);
-void *sda_pop(sda s);
+/** Copy size bytes of t over top of s */
+sda sdacpy(sda s, const void *t, size_t size);
+/** Copy t over top of s */
+sda sda_replace(sda s, const sda t);
+/** Appends item x to sda array s */
+#define sda_append(s, x) ({ \
+    __typeof__(x) tmp = (x); \
+    assert(sizeof(x) == sdasz(s)); \
+    (__typeof__(s))(sdacat((s), &tmp, sizeof(tmp))); \
+    })
+#define sda_pop(s) ({ \
+    typeof(s) ret = (__typeof__(s))_sda_pop(s); \
+    ret != NULL ? (__typeof__(*s))*ret : 0 \
+    })
+
+size_t _sda_index(sda s, const void *x, size_t len);
 
 //This macro:
 // Tests if i is in range
@@ -406,9 +400,8 @@ void *sda_pop(sda s);
  * Returns NULL if i >= len of s
  */
 #define sda_get(s, i) ({ \
-    i < sdalen(s) ? \
-        (typeof(*s))*((typeof(s))_sda_ptr_at((s), (i))) \
-        : 0; \
+    typeof(s) ret = (__typeof__(s))sda_ptr_at((s), (i)); \
+    ret != NULL ? (__typeof__(*s))*ret : 0; \
     })
 /**
  * Returns void pointer to element i of sds array s.
@@ -419,45 +412,56 @@ static inline void *sda_ptr_at(sda s, size_t i) {
     switch(flags&SDA_HTYPE_MASK) {
         case SDA_HTYPE_8: {
             SDA_HDR_VAR(8,s);
-            assert(i < sh->len);
             if(i < sh->len) return ((char *)s) + (sh->sz * i);
             return NULL;
         }
         case SDA_HTYPE_16: {
             SDA_HDR_VAR(16,s);
-            assert(i < sh->len);
             if(i < sh->len) return ((char *)s) + (sh->sz * i);
             return NULL;
         }
         case SDA_HTYPE_32: {
             SDA_HDR_VAR(32,s);
-            assert(i < sh->len);
             if(i < sh->len) return ((char *)s) + (sh->sz * i);
             return NULL;
         }
         case SDA_HTYPE_64: {
             SDA_HDR_VAR(64,s);
-            assert(i < sh->len);
             if(i < sh->len) return ((char *)s) + (sh->sz * i);
             return NULL;
         }
     }
     return NULL;
 }
-// Unsafe
-#define _sda_ptr_at(s, i) (((char *)s) + (sdasz(s)*(i)))
 
 /**
  * Sets element i in sds array s to x.
  * x must be a rvalue and not a pointer.
  */
 #define sda_set(s, i, x) ({ \
-    typeof(x) tmp = (x); \
+    __typeof__(x) tmp = (x); \
+    assert(sizeof(x) == sdasz(s)); \
     _sda_set((s), (i), &tmp, sizeof(tmp)); \
     })
-/**
- * Copies t of size bytes into index i of sds array s.
- */
+
+#if 0
+void sdaslice(sda s, int start, int end);
+int sdacmp(const sda s1, const sda s2);
+#endif //0
+
+/******* Lower level methods for operating on sda's *******/
+
+sda sdaMakeRoomFor(sda s, size_t addlen);
+sda sdaRemoveFreeSpace(sda s);
+size_t sdaAllocSize(sda s);
+void *sdaAllocPtr(sda s);
+
+/* Don't call these directly */
+
+sda _sdanewsz(const void *init, size_t init_sz, size_t type_sz);
+void _sda_raii_free(void *s);
+// Unsafe
+//#define _sdacpyi(s,i,t,size) memcpy(_sda_ptr_at((s),(i)),(t),(size))
 static inline void _sda_set(sda s, size_t i, const void *t, size_t size) {
     unsigned char flags = sdaflags(s);
     switch(flags&SDA_HTYPE_MASK) {
@@ -500,26 +504,8 @@ static inline void _sda_set(sda s, size_t i, const void *t, size_t size) {
     }
 }
 // Unsafe
-#define _sdacpyi(s,i,t,size) memcpy(_sda_ptr_at((s),(i)),(t),(size))
-
-#if 0
-sda sdacat(sda s, const void *t, size_t len);
-sda sdacpy(sda s, const char *t, size_t len);
-
-void sdaslice(sda s, int start, int end);
-int sdacmp(const sda s1, const sda s2);
-#endif //0
-
-/******* Lower level methods for operating on sda's *******/
-
-sda sdaMakeRoomFor(sda s, size_t addlen);
-sda sdaRemoveFreeSpace(sda s);
-size_t sdaAllocSize(sda s);
-void *sdaAllocPtr(sda s);
-
-/* Don't call directly */
-sda _sdanewsz(const void *init, size_t init_sz, size_t type_sz);
-void _sda_raii_free(void *s);
+#define _sda_ptr_at(s, i) (((char *)s) + (sdasz(s)*(i)))
+void *_sda_pop(sda s);
 
 /******* Allocator exposure *******/
 

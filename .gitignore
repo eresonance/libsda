@@ -1,3 +1,7 @@
 research/sds/
 a.exe
 sda_test.exe
+Debug
+libsda.mk
+libsda.project
+libsda.txt
