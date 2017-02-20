@@ -127,14 +127,7 @@ sda sdaresize(sda s, size_t len) {
  * references must be substituted with the new pointer returned by the call.
  */
 sda sdacat(sda s, const void *t, size_t size) {
-    size_t sz;
-    s = sdaMakeRoomFor(s, size);
-    if (s == NULL) return NULL;
-    
-    sz = sdasz(s);
-    memcpy(((char*)s)+sdalen(s)*sz, t, size);
-    sdainclen(s, size/sz);
-    return s;
+    return sda_cpy(s, sdalen(s), t, size);
 }
 
 /* Append the specified sda array 't' to the existing sda array 's'.
@@ -143,30 +136,56 @@ sda sdacat(sda s, const void *t, size_t size) {
  * references must be substituted with the new pointer returned by the call.
  */
 sda sda_extend(sda s, const sda t) {
-    return sdacat(s, t, sdasize(t));
+    return sda_cpy(s, sdalen(s), t, sdasize(t));
 }
 
-/* Destructively modify the sda array 's' to hold the specified array pointed by 't' of 'size' bytes.
+/* Modify the sda array 's' at index i to hold the specified array pointed by 't' of 'size' bytes.
  */
-sda sdacpy(sda s, const void *t, size_t size) {
-    size_t buf_sz = sdasize(s);
-    //make room for the add_sz if needed
-    if(size > buf_sz) {
-        s = sdaMakeRoomFor(s, size-buf_sz);
+sda sda_cpy(sda s, size_t i, const void *t, size_t size) {
+    assert(t != NULL);
+    uint8_t sz = sdasz(s);
+    size_t len = sdalen(s);
+    //offset from s where we will start the copy
+    size_t off = i*sz;
+    //end of the current array
+    size_t end = len*sz;
+    
+    //make room for t if needed
+    if((off+size) > (end)) {
+        s = sdaMakeRoomFor(s, off+size-end);
         if (s == NULL) return NULL;
     }
-    
-    memcpy(s, t, size);
-    sdasetlen(s, size/sdasz(s));
+    //if i is beyond len, then 0 out the difference from end to off
+    if(i > len) {
+        memset(((char*)s)+end, 0, off-end);
+    }
+    //copy t over s
+    memcpy(((char*)s)+off, t, size);
+    //set the len only if it grew;
+    // if t is wholy encompased by s.len then leave it be
+    if((off+size) > (end)) {
+        sdasetlen(s, (off+size)/sz);
+    }
     return s;
 }
 
-/* Destructively modify sda array 's' to hold the sds array 't', expanding s if needed.
+/* Destructively modify sda array 's' to hold the sds array 't', shrinking/expanding s if needed.
  */
 sda sda_replace(sda s, const sda t) {
-    return sdacpy(s, t, sdasize(t));
+    sda ret = sda_cpy(s, 0, t, sdasize(t));
+    sdasetlen(s, sdalen(t));
+    return ret;
 }
 
+void *sda_pop_ptr(sda s) {
+    size_t len = sdalen(s);
+    void *ret;
+    if(len < 1) return NULL;
+    //guaranteed, so use faster unsafe ver
+    ret = _sda_ptr_at(s, len-1);
+    sdasetlen(s, len-1);
+    return ret;
+}
 
 
 #if 0 //FIXME: Implement?
@@ -278,31 +297,36 @@ sda sdaMakeRoomFor(sda s, size_t add_sz) {
     //get all of the members
     sdahdr(s, &shadow);
     
+    //it's most likely an error if add_sz isn't evenly divisible by shadow.sz
+    assert(add_sz%shadow.sz == 0);
+    
     void *sh, *newsh;
-    size_t avail_sz = (shadow.alloc - shadow.len)*shadow.sz;
-    size_t newlen;
+    size_t buf_sz = shadow.len*shadow.sz;
+    size_t avail_sz = shadow.alloc - buf_sz;
     char type;
     unsigned char oldtype;
-    size_t hdr_sz;
-    size_t buf_sz;
     size_t new_sz;
+    size_t hdr_sz;
 
     // Return ASAP if there is enough space left.
     if (avail_sz >= add_sz) return s;
     
     // Determine how much we need to allocate
-    oldtype = shadow.flags & SDA_HTYPE_MASK;
-    sh = (char*)s-sdaHdrSize(oldtype);
-    newlen = shadow.len + (add_sz/shadow.sz);
-    if (newlen < SDA_MAX_PREALLOC)
-        newlen *= 2;
-    else
-        newlen += SDA_MAX_PREALLOC;
-    type = sdaReqType(newlen);
-
-    hdr_sz = sdaHdrSize(type);
-    buf_sz = shadow.len*shadow.sz;
     new_sz = buf_sz + add_sz;
+    if(new_sz < SDA_MAX_PREALLOC) {
+        //add a bit more room
+        new_sz *= 2;
+    }
+    else {
+        //only add up to SDA_MAX_PREALLOC extra bytes
+        new_sz += SDA_MAX_PREALLOC;
+    }
+    
+    //make sure we can address all the new alloc space
+    type = sdaReqType(new_sz/shadow.sz);
+    oldtype = shadow.flags & SDA_HTYPE_MASK;
+    sh = ((char*)s)-sdaHdrSize(oldtype);
+    hdr_sz = sdaHdrSize(type);
     if (oldtype==type) {
         //type is still big enough to hold the new allocated mem
         newsh = _sda_realloc(sh, hdr_sz+new_sz);
@@ -311,7 +335,7 @@ sda sdaMakeRoomFor(sda s, size_t add_sz) {
             _sda_free(sh);
             return NULL;
         }
-        s = (char*)newsh+hdr_sz;
+        s = ((char*)newsh)+hdr_sz;
     } else {
         /* Since the header size changes, need to move the array forward,
          * and can't use realloc */
@@ -321,13 +345,14 @@ sda sdaMakeRoomFor(sda s, size_t add_sz) {
             _sda_free(sh);
             return NULL;
         }
-        memcpy((char*)newsh+hdr_sz, s, buf_sz);
+        memcpy(((char*)newsh)+hdr_sz, s, buf_sz);
         _sda_free(sh);
-        s = (char*)newsh+hdr_sz;
+        s = ((char*)newsh)+hdr_sz;
         sdasetflags(s, type);
+        //len stays the same
         sdasetlen(s, shadow.len);
     }
-    sdasetalloc(s, newlen);
+    sdasetalloc(s, new_sz);
     return s;
 }
 
@@ -346,7 +371,7 @@ sda sdaRemoveFreeSpace(sda s) {
     size_t len = sdalen(s);
     //size of the actual buffer
     size_t bsz = sdasize(s);
-    sh = (char*)s-sdaHdrSize(oldtype);
+    sh = ((char*)s)-sdaHdrSize(oldtype);
 
     type = sdaReqType(len);
     hdr_sz = sdaHdrSize(type);
@@ -356,20 +381,20 @@ sda sdaRemoveFreeSpace(sda s) {
             _sda_free(sh);
             return NULL;
         }
-        s = (char*)newsh+hdr_sz;
+        s = ((char*)newsh)+hdr_sz;
     } else {
         newsh = _sda_malloc(hdr_sz+bsz);
         if (newsh == NULL) {
             _sda_free(sh);
             return NULL;
         }
-        memcpy((char*)newsh+hdr_sz, s, bsz);
+        memcpy(((char*)newsh)+hdr_sz, s, bsz);
         _sda_free(sh);
-        s = (char*)newsh+hdr_sz;
+        s = ((char*)newsh)+hdr_sz;
         sdasetflags(s, type);
         sdasetlen(s, len);
     }
-    sdasetalloc(s, len);
+    sdasetalloc(s, bsz);
     return s;
 }
 
@@ -380,8 +405,7 @@ sda sdaRemoveFreeSpace(sda s) {
  * 3) The free buffer at the end if any.
  */
 size_t sdaAllocSize(sda s) {
-    size_t alloc_sz = sdasz(s)*sdaalloc(s);
-    return sdaHdrSize(sdaflags(s))+alloc_sz;
+    return sdaHdrSize(sdaflags(s))+sdaalloc(s);
 }
 
 /* Return the pointer of the actual SDA allocation (normally SDA arrays
@@ -391,23 +415,29 @@ void *sdaAllocPtr(sda s) {
 }
 
 sda _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
+    //can't use crazy large types
     assert(type_sz <= UINT8_MAX);
+    //must allocate an even number of elements
+    assert(init_sz%type_sz == 0);
     
     //ptr to sda header
     void *sh;
     //ptr that we'll return
     char *s;
-    char sda_type = sdaReqType(init_sz);
-    size_t hdr_sz = sdaHdrSize(sda_type);
     //flags pointer
     unsigned char *fp;
     //converted type_sz
     uint8_t sz = (uint8_t)type_sz;
+    //len of new array
+    size_t len = init_sz/sz;
+    //how many elements can we hold?
+    char sda_type = sdaReqType(len);
+    size_t hdr_sz = sdaHdrSize(sda_type);
 
     //allocate the full sda
     sh = _sda_malloc(hdr_sz+init_sz);
     if (sh == NULL) return NULL;
-    if (!init)
+    if(init == NULL)
         memset(sh, 0, hdr_sz+init_sz);
     s = (char*)sh+hdr_sz;
     fp = ((unsigned char*)s)-1;
@@ -415,33 +445,29 @@ sda _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
     switch(sda_type) {
         case SDA_HTYPE_8: {
             SDA_HDR_VAR(8,s);
-            uint8_t len = (uint8_t)(init_sz/type_sz);
-            sh->len = len;
-            sh->alloc = len;
+            sh->len = (uint8_t)len;
+            sh->alloc = init_sz;
             sh->sz = sz;
             break;
         }
         case SDA_HTYPE_16: {
             SDA_HDR_VAR(16,s);
-            uint16_t len = (uint16_t)(init_sz/type_sz);
-            sh->len = len;
-            sh->alloc = len;
+            sh->len = (uint16_t)len;
+            sh->alloc = init_sz;
             sh->sz = sz;
             break;
         }
         case SDA_HTYPE_32: {
             SDA_HDR_VAR(32,s);
-            uint32_t len = (uint32_t)(init_sz/type_sz);
-            sh->len = len;
-            sh->alloc = len;
+            sh->len = (uint32_t)len;
+            sh->alloc = init_sz;
             sh->sz = sz;
             break;
         }
         case SDA_HTYPE_64: {
             SDA_HDR_VAR(64,s);
-            uint64_t len = (uint64_t)(init_sz/type_sz);
-            sh->len = len;
-            sh->alloc = len;
+            sh->len = (uint64_t)len;
+            sh->alloc = init_sz;
             sh->sz = sz;
             break;
         }
@@ -451,15 +477,6 @@ sda _sdanewsz(const void *init, size_t init_sz, size_t type_sz) {
     return s;
 }
 
-void *_sda_pop(sda s) {
-    size_t len = sdalen(s);
-    void *ret;
-    if(len < 1) return NULL;
-    //guaranteed, so use faster unsafe ver
-    ret = _sda_ptr_at(s, len-1);
-    sdasetlen(s, len-1);
-    return ret;
-}
 
 /******* Test stuff *******/
 
@@ -471,8 +488,9 @@ int main(void) {
     int tmp_len = sizeof(tmp)/sizeof(*tmp);
     
     sda_raii sdaint s = sdanew(s, tmp);
+    assert(sizeof(*s) == sizeof(*tmp));
     assert(sdalen(s) == tmp_len);
-    assert(sdaalloc(s) == sdalen(s));
+    assert(sdaalloc(s) == sdalen(s)*sizeof(*s));
     assert(sdaavail(s) == 0);
     assert(sdaflags(s) == SDA_HTYPE_8);
     
@@ -496,21 +514,22 @@ int main(void) {
     //shrink
     int res1 = 3;
     s = sdaresize(s, sdalen(s)-res1);
-    printf("s len=%zu alloc=%zu\n",sdalen(s), sdaalloc(s));
+    printf("s len=%zu alloc=%zu avail=%zu\n",sdalen(s), sdaalloc(s), sdaavail(s));
     assert(sdalen(s) == tmp_len-res1);
-    assert(sdaalloc(s) == tmp_len);
+    assert(sdaalloc(s) == tmp_len*sizeof(*s));
     
     //grow, but not greater than alloc size
     int res2 = 2;
     s = sdaresize(s, sdalen(s)+res2);
-    printf("s len=%zu alloc=%zu\n",sdalen(s), sdaalloc(s));
+    printf("s len=%zu alloc=%zu avail=%zu\n",sdalen(s), sdaalloc(s), sdaavail(s));
     assert(sdalen(s) == tmp_len-res1+res2);
-    assert(sdaalloc(s) == tmp_len);
+    assert(sdaalloc(s) == tmp_len*sizeof(*s));
     
     s = sdaresize(s, sdalen(t)+10);
-    printf("s len=%zu alloc=%zu\n",sdalen(s), sdaalloc(s));
+    printf("s len=%zu alloc=%zu avail=%zu\n",sdalen(s), sdaalloc(s), sdaavail(s));
     assert(sdalen(s) == sdalen(t)+10);
-    assert(sdaalloc(s) > sdalen(s));
+    assert(sdaalloc(s) > sdalen(s)*sizeof(*s));
+    assert(sdaavail(s) > 0);
     
     puts("sdaclear");
     sdaclear(s);
@@ -550,7 +569,53 @@ int main(void) {
     //illegal
     sda_set(t, sdalen(t), 1234);
     
+    //play around with cat/cpy/append
+    sda_raii sdaint u = sdaempty(u);
+    assert(sdalen(u) == 0);
+    assert(sdaavail(u) == 0);
+    tmp1 = 32;
+    for(int i=12; i< 12+tmp1; i+=2) {
+        u = sda_append(u, i);
+    }
+    assert(sdalen(u) == tmp1/2);
+    assert(sdaalloc(u) >= sdalen(u)*sizeof(*u));
     
+    for(int i=0; i<sdalen(u); i++) {
+        assert(u[i] == sda_get(u, i));
+        printf("  u[%d] %d == %d\n", i, u[i], sda_get(u, i));
+    }
+    printf("u len=%zu alloc=%zu avail=%zu\n",sdalen(u), sdaalloc(u), sdaavail(u));
+    
+   
+    u = sda_extend(u, t);
+    assert(sdalen(u) == tmp1/2+sdalen(t));
+    printf("u len=%zu alloc=%zu avail=%zu\n",sdalen(u), sdaalloc(u), sdaavail(u));
+    
+    u = sdacat(u, tmp, sizeof(tmp));
+    printf("u len=%zu alloc=%zu avail=%zu\n",sdalen(u), sdaalloc(u), sdaavail(u));
+    for(int i=0; i<sdalen(u); i++) {
+        assert(u[i] == sda_get(u, i));
+        printf("  u[%d] %d == %d\n", i, u[i], sda_get(u, i));
+    }
+    
+    u = sda_replace(u, t);
+    assert(sdalen(u) == sdalen(t));
+    assert(sdaalloc(u) > sdaalloc(t));
+    printf("u len=%zu alloc=%zu avail=%zu\n",sdalen(u), sdaalloc(u), sdaavail(u));
+    
+    //this should work
+    u = sda_extend(u, u);
+    for(int i=0; i<sdalen(u); i++) {
+        assert(u[i] == sda_get(u, i));
+        printf("  u[%d] %d == %d\n", i, u[i], sda_get(u, i));
+    }
+    //and so should this
+    int *ptr = 0;
+    while((ptr = sda_pop_ptr(u)) != NULL) {
+        int x = *ptr;
+        printf("pop u x=%d\n", x);
+    }
+    assert(sdalen(u) == 0);
     
     puts("done");
     return 0;
