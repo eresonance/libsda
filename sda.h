@@ -33,28 +33,15 @@
 
 #include <sys/types.h>
 #include <stdint.h>
+#include <string.h>
 #include "sdsalloc.h"
 
 #if defined(SDA_TEST_MAIN)
 #include <stdio.h>
 #endif
 
-#if UINTPTR_MAX == 0xffffffff
-#  define _SDA_32
-#  if defined(SDA_TEST_MAIN)
-#    pragma message "32bit"
-#  endif
-#elif UINTPTR_MAX == 0xffffffffffffffff
-#  define _SDA_64
-#  if defined(SDA_TEST_MAIN)
-#    pragma message "64bit"
-#  endif
-#else
-#  error Unknown processor arch
-#endif
-
-//Determines the maximum number of bytes to pre-allocate
-#define SDA_MAX_PREALLOC (256)
+//Determines the maximum number of bytes to pre-allocate, must be multiples of 64
+#define SDA_MAX_PREALLOC (64*4)
 
 //Types designed for type-checking arguments to functions that may use sda arrays
 typedef char *sdachar;
@@ -68,45 +55,34 @@ typedef void *sda;
 //special attribute that tells gcc to automatically free the sda array when going out of scope
 #define sda_raii __attribute__ ((__cleanup__ (_sda_raii_free)))
 
-struct __attribute__ ((__packed__)) sda_hdr8 {
-    uint8_t len; /* Number of elements in the buffer */
-    uint8_t alloc; /* Number of bytes allocated */
-    uint8_t sz;  /* Size in bytes of element */
-#if defined(_SDA_64)
-    uint8_t _pad[4]; /* padding to make sure accesses to buf[*] are aligned */
-#endif
-    unsigned char flags; /* 3 lsb of type, 5 unused bits */
-    char buf[];
-};
-struct __attribute__ ((__packed__)) sda_hdr16 {
-    uint16_t len;
-    uint16_t alloc;
-    uint8_t sz;
-    uint8_t _pad[2];
-    unsigned char flags;
-    char buf[];
-};
-struct __attribute__ ((__packed__)) sda_hdr32 {
-    uint32_t len;
+// small version of the header, 32+16+8+8 = 64
+struct __attribute__ ((__packed__)) sda_hdr_SM {
+    /// Number of bytes allocated
     uint32_t alloc;
+    /// Number of elements in the array
+    uint16_t len;
+    /// Size of each element
     uint8_t sz;
-#if defined(_SDA_32)
-    uint8_t _pad[2];
-#elif defined(_SDA_64)
-    uint8_t _pad[6];
-#endif
+    /// HTYPE flags
+    unsigned char flags;
+    /// Buffer to hold the data in
+    char buf[];
+};
+// medium version of the header, 64+32+8*4 = 128
+struct __attribute__ ((__packed__)) sda_hdr_MD {
+    uint64_t alloc;
+    uint32_t len;
+    uint8_t sz;
+    uint8_t _pad[2]; // padding to make sure 64b accesses to buf[] are aligned
     unsigned char flags;
     char buf[];
 };
-struct __attribute__ ((__packed__)) sda_hdr64 {
+// full-sized version of the header, 64+64+8*8 = 192
+struct __attribute__ ((__packed__)) sda_hdr_LG {
+    uint64_t alloc; //use uint64 over size_t to make sure 64b accesses are aligned on all arch's
     uint64_t len;
-    uint64_t alloc;
     uint8_t sz;
-#if defined(_SDA_32)
-    uint8_t _pad[2];
-#elif defined(_SDA_64)
-    uint8_t _pad[6];
-#endif
+    uint8_t _pad[6]; // padding to make sure 64b accesses to buf[] are aligned
     unsigned char flags;
     char buf[];
 };
@@ -119,16 +95,15 @@ struct sda_hdr_uni {
 };
 
 //sda_hdr* type
-#define SDA_HTYPE_8  1
-#define SDA_HTYPE_16 2
-#define SDA_HTYPE_32 3
-#define SDA_HTYPE_64 4
-#define SDA_HTYPE_BITS 3
-#define SDA_HTYPE_MASK 7
+#define SDA_HTYPE_SM  1
+#define SDA_HTYPE_MD  2
+#define SDA_HTYPE_LG  3
+#define SDA_HTYPE_BITS 2
+#define SDA_HTYPE_MASK 3
 
-#define SDA_HDR_TYPE(T)  struct sda_hdr##T
-#define SDA_HDR_VAR(T,s) struct sda_hdr##T *sh = (void*)(((char *)s)-(sizeof(struct sda_hdr##T)))
-#define SDA_HDR(T,s) ((struct sda_hdr##T *)(((char *)s)-(sizeof(struct sda_hdr##T))))
+#define SDA_HDR_TYPE(T)  struct sda_hdr_##T
+#define SDA_HDR_VAR(T,s) SDA_HDR_TYPE(T) *sh = (void*)(((char *)s)-(sizeof(SDA_HDR_TYPE(T))))
+#define SDA_HDR(T,s) ((SDA_HDR_TYPE(T) *)(((char *)s)-(sizeof(SDA_HDR_TYPE(T)))))
 
 /******* Methods for accessing each member *******/
 
@@ -141,14 +116,12 @@ static inline unsigned char sda_flags(const sda s) {
 static inline size_t sda_len(const sda s) {
     unsigned char flags = sda_flags(s);
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8:
-            return SDA_HDR(8,s)->len;
-        case SDA_HTYPE_16:
-            return SDA_HDR(16,s)->len;
-        case SDA_HTYPE_32:
-            return SDA_HDR(32,s)->len;
-        case SDA_HTYPE_64:
-            return SDA_HDR(64,s)->len;
+        case SDA_HTYPE_SM:
+            return SDA_HDR(SM,s)->len;
+        case SDA_HTYPE_MD:
+            return SDA_HDR(MD,s)->len;
+        case SDA_HTYPE_LG:
+            return SDA_HDR(LG,s)->len;
     }
     return 0;
 }
@@ -157,14 +130,12 @@ static inline size_t sda_len(const sda s) {
 static inline size_t sda_alloc(const sda s) {
     unsigned char flags = sda_flags(s);
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8:
-            return SDA_HDR(8,s)->alloc;
-        case SDA_HTYPE_16:
-            return SDA_HDR(16,s)->alloc;
-        case SDA_HTYPE_32:
-            return SDA_HDR(32,s)->alloc;
-        case SDA_HTYPE_64:
-            return SDA_HDR(64,s)->alloc;
+        case SDA_HTYPE_SM:
+            return SDA_HDR(SM,s)->alloc;
+        case SDA_HTYPE_MD:
+            return SDA_HDR(MD,s)->alloc;
+        case SDA_HTYPE_LG:
+            return SDA_HDR(LG,s)->alloc;
     }
     return 0;
 }
@@ -173,14 +144,12 @@ static inline size_t sda_alloc(const sda s) {
 static inline size_t sda_sz(const sda s) {
     unsigned char flags = sda_flags(s);
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8:
-            return SDA_HDR(8,s)->sz;
-        case SDA_HTYPE_16:
-            return SDA_HDR(16,s)->sz;
-        case SDA_HTYPE_32:
-            return SDA_HDR(32,s)->sz;
-        case SDA_HTYPE_64:
-            return SDA_HDR(64,s)->sz;
+        case SDA_HTYPE_SM:
+            return SDA_HDR(SM,s)->sz;
+        case SDA_HTYPE_MD:
+            return SDA_HDR(MD,s)->sz;
+        case SDA_HTYPE_LG:
+            return SDA_HDR(LG,s)->sz;
     }
     return 0;
 }
@@ -190,29 +159,22 @@ static inline void sda_hdr(const sda s, struct sda_hdr_uni *ret) {
     unsigned char flags = sda_flags(s);
     ret->flags = flags;
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8: {
-            SDA_HDR_VAR(8,s);
+        case SDA_HTYPE_SM: {
+            SDA_HDR_VAR(SM,s);
             ret->len = sh->len;
             ret->alloc = sh->alloc;
             ret->sz = sh->sz;
             break;
         }
-        case SDA_HTYPE_16: {
-            SDA_HDR_VAR(16,s);
+        case SDA_HTYPE_MD: {
+            SDA_HDR_VAR(MD,s);
             ret->len = sh->len;
             ret->alloc = sh->alloc;
             ret->sz = sh->sz;
             break;
         }
-        case SDA_HTYPE_32: {
-            SDA_HDR_VAR(32,s);
-            ret->len = sh->len;
-            ret->alloc = sh->alloc;
-            ret->sz = sh->sz;
-            break;
-        }
-        case SDA_HTYPE_64: {
-            SDA_HDR_VAR(64,s);
+        case SDA_HTYPE_LG: {
+            SDA_HDR_VAR(LG,s);
             ret->len = sh->len;
             ret->alloc = sh->alloc;
             ret->sz = sh->sz;
@@ -234,20 +196,16 @@ static inline void sda_hdr(const sda s, struct sda_hdr_uni *ret) {
 static inline size_t sda_size(const sda s) {
     unsigned char flags = sda_flags(s);
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8: {
-            SDA_HDR_VAR(8,s);
+        case SDA_HTYPE_SM: {
+            SDA_HDR_VAR(SM,s);
             return sh->sz * sh->len;
         }
-        case SDA_HTYPE_16: {
-            SDA_HDR_VAR(16,s);
+        case SDA_HTYPE_MD: {
+            SDA_HDR_VAR(MD,s);
             return sh->sz * sh->len;
         }
-        case SDA_HTYPE_32: {
-            SDA_HDR_VAR(32,s);
-            return sh->sz * sh->len;
-        }
-        case SDA_HTYPE_64: {
-            SDA_HDR_VAR(64,s);
+        case SDA_HTYPE_LG: {
+            SDA_HDR_VAR(LG,s);
             return sh->sz * sh->len;
         }
     }
@@ -260,20 +218,16 @@ static inline size_t sda_size(const sda s) {
 static inline size_t sda_avail(const sda s) {
     unsigned char flags = sda_flags(s);
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8: {
-            SDA_HDR_VAR(8,s);
+        case SDA_HTYPE_SM: {
+            SDA_HDR_VAR(SM,s);
             return sh->alloc/sh->sz - sh->len;
         }
-        case SDA_HTYPE_16: {
-            SDA_HDR_VAR(16,s);
+        case SDA_HTYPE_MD: {
+            SDA_HDR_VAR(MD,s);
             return sh->alloc/sh->sz - sh->len;
         }
-        case SDA_HTYPE_32: {
-            SDA_HDR_VAR(32,s);
-            return sh->alloc/sh->sz - sh->len;
-        }
-        case SDA_HTYPE_64: {
-            SDA_HDR_VAR(64,s);
+        case SDA_HTYPE_LG: {
+            SDA_HDR_VAR(LG,s);
             return sh->alloc/sh->sz - sh->len;
         }
     }
@@ -372,23 +326,18 @@ void *sda_pop_ptr(sda s);
 static inline void *sda_ptr_at(sda s, size_t i) {
     unsigned char flags = sda_flags(s);
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8: {
-            SDA_HDR_VAR(8,s);
+        case SDA_HTYPE_SM: {
+            SDA_HDR_VAR(SM,s);
             if(i < sh->len) return ((char *)s) + (sh->sz * i);
             return NULL;
         }
-        case SDA_HTYPE_16: {
-            SDA_HDR_VAR(16,s);
+        case SDA_HTYPE_MD: {
+            SDA_HDR_VAR(MD,s);
             if(i < sh->len) return ((char *)s) + (sh->sz * i);
             return NULL;
         }
-        case SDA_HTYPE_32: {
-            SDA_HDR_VAR(32,s);
-            if(i < sh->len) return ((char *)s) + (sh->sz * i);
-            return NULL;
-        }
-        case SDA_HTYPE_64: {
-            SDA_HDR_VAR(64,s);
+        case SDA_HTYPE_LG: {
+            SDA_HDR_VAR(LG,s);
             if(i < sh->len) return ((char *)s) + (sh->sz * i);
             return NULL;
         }
@@ -426,8 +375,8 @@ void _sda_raii_free(void *s);
 static inline void _sda_set(sda s, size_t i, const void *t, size_t size) {
     unsigned char flags = sda_flags(s);
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8: {
-            SDA_HDR_VAR(8,s);
+        case SDA_HTYPE_SM: {
+            SDA_HDR_VAR(SM,s);
             size_t start = i*sh->sz;
             //make sure we don't overrun len
             if((start + size) <= (sh->len*sh->sz)) {
@@ -435,8 +384,8 @@ static inline void _sda_set(sda s, size_t i, const void *t, size_t size) {
             }
             break;
         }
-        case SDA_HTYPE_16: {
-            SDA_HDR_VAR(16,s);
+        case SDA_HTYPE_MD: {
+            SDA_HDR_VAR(MD,s);
             size_t start = i*sh->sz;
             //make sure we don't overrun len
             if((start + size) <= (sh->len*sh->sz)) {
@@ -444,17 +393,8 @@ static inline void _sda_set(sda s, size_t i, const void *t, size_t size) {
             }
             break;
         }
-        case SDA_HTYPE_32: {
-            SDA_HDR_VAR(32,s);
-            size_t start = i*sh->sz;
-            //make sure we don't overrun len
-            if((start + size) <= (sh->len*sh->sz)) {
-                memcpy((((char *)s) + start), t, size);
-            }
-            break;
-        }
-        case SDA_HTYPE_64: {
-            SDA_HDR_VAR(64,s);
+        case SDA_HTYPE_LG: {
+            SDA_HDR_VAR(LG,s);
             size_t start = i*sh->sz;
             //make sure we don't overrun len
             if((start + size) <= (sh->len*sh->sz)) {
@@ -473,17 +413,14 @@ static inline void _sda_set(sda s, size_t i, const void *t, size_t size) {
 static inline void _sda_set_len(sda s, size_t newlen) {
     unsigned char flags = sda_flags(s);
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8:
-            SDA_HDR(8,s)->len = newlen;
+        case SDA_HTYPE_SM:
+            SDA_HDR(SM,s)->len = newlen;
             break;
-        case SDA_HTYPE_16:
-            SDA_HDR(16,s)->len = newlen;
+        case SDA_HTYPE_MD:
+            SDA_HDR(MD,s)->len = newlen;
             break;
-        case SDA_HTYPE_32:
-            SDA_HDR(32,s)->len = newlen;
-            break;
-        case SDA_HTYPE_64:
-            SDA_HDR(64,s)->len = newlen;
+        case SDA_HTYPE_LG:
+            SDA_HDR(LG,s)->len = newlen;
             break;
     }
 }
@@ -494,17 +431,14 @@ static inline void _sda_set_len(sda s, size_t newlen) {
 static inline void _sda_set_alloc(sda s, size_t newsz) {
     unsigned char flags = sda_flags(s);
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8:
-            SDA_HDR(8,s)->alloc = newsz;
+        case SDA_HTYPE_SM:
+            SDA_HDR(SM,s)->alloc = newsz;
             break;
-        case SDA_HTYPE_16:
-            SDA_HDR(16,s)->alloc = newsz;
+        case SDA_HTYPE_MD:
+            SDA_HDR(MD,s)->alloc = newsz;
             break;
-        case SDA_HTYPE_32:
-            SDA_HDR(32,s)->alloc = newsz;
-            break;
-        case SDA_HTYPE_64:
-            SDA_HDR(64,s)->alloc = newsz;
+        case SDA_HTYPE_LG:
+            SDA_HDR(LG,s)->alloc = newsz;
             break;
     }
 }
@@ -520,17 +454,14 @@ static inline void _sda_set_flags(sda s, unsigned char flags) {
 static inline void _sda_set_sz(sda s, uint8_t newsz) {
     unsigned char flags = sda_flags(s);
     switch(flags&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8:
-            SDA_HDR(8,s)->sz = newsz;
+        case SDA_HTYPE_SM:
+            SDA_HDR(SM,s)->sz = newsz;
             break;
-        case SDA_HTYPE_16:
-            SDA_HDR(16,s)->sz = newsz;
+        case SDA_HTYPE_MD:
+            SDA_HDR(MD,s)->sz = newsz;
             break;
-        case SDA_HTYPE_32:
-            SDA_HDR(32,s)->sz = newsz;
-            break;
-        case SDA_HTYPE_64:
-            SDA_HDR(64,s)->sz = newsz;
+        case SDA_HTYPE_LG:
+            SDA_HDR(LG,s)->sz = newsz;
             break;
     }
 }

@@ -30,38 +30,31 @@
 
 #include <stdlib.h>
 #include <assert.h>
-#include <string.h>
 #include "sda.h"
 
 /******* Private helpper functions *******/
 
 static inline size_t _sda_hdr_size(char type) {
     switch(type&SDA_HTYPE_MASK) {
-        case SDA_HTYPE_8:
-            return sizeof(SDA_HDR_TYPE(8));
-        case SDA_HTYPE_16:
-            return sizeof(SDA_HDR_TYPE(16));
-        case SDA_HTYPE_32:
-            return sizeof(SDA_HDR_TYPE(32));
-        case SDA_HTYPE_64:
-            return sizeof(SDA_HDR_TYPE(64));
+        case SDA_HTYPE_SM:
+            return sizeof(SDA_HDR_TYPE(SM));
+        case SDA_HTYPE_MD:
+            return sizeof(SDA_HDR_TYPE(MD));
+        case SDA_HTYPE_LG:
+            return sizeof(SDA_HDR_TYPE(LG));
     }
     return 0;
 }
 
 /**
- * HTYPE required to make sure alloc is big enough to store req_size (in bytes).
+ * HTYPE required to make sure alloc and len are big enough
  */
-static inline char _sda_req_htype(size_t req_size) {
-    if (req_size < 1<<8)
-        return SDA_HTYPE_8;
-    if (req_size < 1<<16)
-        return SDA_HTYPE_16;
-#if (LONG_MAX == LLONG_MAX)
-    if (req_size < 1ll<<32)
-        return SDA_HTYPE_32;
-#endif
-    return SDA_HTYPE_64;
+static inline char _sda_req_htype(size_t req_size, size_t req_len) {
+    if((req_size < UINT32_MAX) && (req_len < UINT16_MAX))
+        return SDA_HTYPE_SM;
+    if((req_size < UINT64_MAX) && (req_len < UINT32_MAX))
+        return SDA_HTYPE_MD;
+    return SDA_HTYPE_LG;
 }
 
 
@@ -324,7 +317,7 @@ sda sda_prealloc(sda s, size_t add_sz) {
     }
     
     //make sure we can address all the new alloc space
-    type = _sda_req_htype(new_sz);
+    type = _sda_req_htype(new_sz, new_sz/shadow.sz);
     oldtype = shadow.flags & SDA_HTYPE_MASK;
     sh = ((char*)s)-_sda_hdr_size(oldtype);
     hdr_sz = _sda_hdr_size(type);
@@ -379,7 +372,7 @@ sda sda_compact(sda s) {
     unsigned char oldtype;
     size_t hdr_sz;
 
-    type = _sda_req_htype(buf_sz);
+    type = _sda_req_htype(buf_sz, shadow.len);
     oldtype = shadow.flags & SDA_HTYPE_MASK;
     sh = ((char*)s)-_sda_hdr_size(oldtype);
     hdr_sz = _sda_hdr_size(type);
@@ -442,7 +435,7 @@ sda _sda_new_sz(const void *init, size_t init_sz, size_t type_sz) {
     //len of new array
     size_t len = init_sz/sz;
     //how many bytes can we hold?
-    char sda_type = _sda_req_htype(init_sz);
+    char sda_type = _sda_req_htype(init_sz, len);
     size_t hdr_sz = _sda_hdr_size(sda_type);
 
     //allocate the full sda
@@ -454,30 +447,23 @@ sda _sda_new_sz(const void *init, size_t init_sz, size_t type_sz) {
     fp = ((unsigned char*)s)-1;
     *fp = sda_type;
     switch(sda_type) {
-        case SDA_HTYPE_8: {
-            SDA_HDR_VAR(8,s);
-            sh->len = (uint8_t)len;
+        case SDA_HTYPE_SM: {
+            SDA_HDR_VAR(SM,s);
+            sh->len = len;
             sh->alloc = init_sz;
             sh->sz = sz;
             break;
         }
-        case SDA_HTYPE_16: {
-            SDA_HDR_VAR(16,s);
-            sh->len = (uint16_t)len;
+        case SDA_HTYPE_MD: {
+            SDA_HDR_VAR(MD,s);
+            sh->len = len;
             sh->alloc = init_sz;
             sh->sz = sz;
             break;
         }
-        case SDA_HTYPE_32: {
-            SDA_HDR_VAR(32,s);
-            sh->len = (uint32_t)len;
-            sh->alloc = init_sz;
-            sh->sz = sz;
-            break;
-        }
-        case SDA_HTYPE_64: {
-            SDA_HDR_VAR(64,s);
-            sh->len = (uint64_t)len;
+        case SDA_HTYPE_LG: {
+            SDA_HDR_VAR(LG,s);
+            sh->len = len;
             sh->alloc = init_sz;
             sh->sz = sz;
             break;
@@ -494,18 +480,17 @@ sda _sda_new_sz(const void *init, size_t init_sz, size_t type_sz) {
 #if defined(SDA_TEST_MAIN)
 void _sda_raii_free(void *s);
 
+
 int main(void) {
     int32_t tmp[] = {0, 1, 2, 3, 4, 5};
-    int tmp_len = sizeof(tmp)/sizeof(*tmp);
-    uint32_t huge[1024+2] = {0};
-    int huge_len = sizeof(huge)/sizeof(*huge);
+    size_t tmp_len = sizeof(tmp)/sizeof(*tmp);
     
     sda_raii sdaint s = sda_new(s, tmp);
     assert(sizeof(*s) == sizeof(*tmp));
     assert(sda_len(s) == tmp_len);
     assert(sda_alloc(s) == sda_len(s)*sizeof(*s));
     assert(sda_avail(s) == 0);
-    assert(sda_flags(s) == SDA_HTYPE_8);
+    assert(sda_flags(s) == SDA_HTYPE_SM);
     
     for(int i=0; i<sda_len(s); i++) {
         printf("  s[%d] %d\n", i, s[i]);
@@ -630,13 +615,41 @@ int main(void) {
     }
     assert(sda_len(u) == 0);
     
-    char oldtype = sda_flags(u)&SDA_HTYPE_MASK;
-    u = sda_cat(u, huge, sizeof(huge));
-    printf("u len=%zu alloc=%zu avail=%zu\n",sda_len(u), sda_alloc(u), sda_avail(u));
-    assert((sda_flags(u)&SDA_HTYPE_MASK) != oldtype);
-    assert(sda_len(u) == huge_len);
+    //push the len to make it use the medium-width version
+    //to push the len into a new type sda_hdr_MD
+    size_t huge_sz = UINT16_MAX+1;
+    uint8_t *huge   = malloc(huge_sz);
+    sda_raii uint8_t *v = sda_new_sz(v, huge, huge_sz);
+    printf("v len=%zu alloc=%zu avail=%zu\n",sda_len(v), sda_alloc(v), sda_avail(v));
+    assert((sda_flags(v)&SDA_HTYPE_MASK) == SDA_HTYPE_MD);
+    assert(sda_len(v) == huge_sz);
+    huge[UINT16_MAX-74] = 0xff;
+    v[UINT16_MAX-74] = 12;
+    assert(sda_get(v, UINT16_MAX-74) == 12);
+    
+#if 0 //doesn't work well with drmemory
+    //push the len again!
+    free(huge);
+    printf("%zu %zu %llu\n", sizeof(size_t), SIZE_MAX, UINT32_MAX+10LL);
+    huge_sz = UINT32_MAX+10LL;
+    printf("%zu %zu\n", sizeof(huge_sz), huge_sz);
+    huge = malloc(huge_sz);
+    assert(huge != NULL);
+    huge[UINT32_MAX] = 12;
+    
+    v = sda_cpy(v, 0, huge, huge_sz);
+    assert(v != NULL);
+    printf("v len=%zu alloc=%zu avail=%zu\n",sda_len(v), sda_alloc(v), sda_avail(v));
+    assert((sda_flags(v)&SDA_HTYPE_MASK) == SDA_HTYPE_LG);
+    assert(sda_len(v) == huge_sz);
+    assert(sda_get(v, UINT32_MAX) == 12);
+    huge[UINT32_MAX] = 0xff;
+    assert(sda_get(v, UINT32_MAX) == 12);
+#endif
     
     puts("done");
+    free(huge);
+    huge = NULL;
     return 0;
 }
 #endif
