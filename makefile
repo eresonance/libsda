@@ -9,4 +9,7 @@ sda_test.exe: sda.c sda.h sdsalloc.h
 drmemory: sda_test.exe
 	/c/usr/drmemory/bin/drmemory.exe -v sda_test.exe
 
-.PHONY:=all drmemory
+clean:
+	rm sda_test.exe
+
+.PHONY:=all drmemory clean
